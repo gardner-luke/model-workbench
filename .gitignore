@@ -5,9 +5,3 @@ dist/
 build/
 .env
 .databricks/
-.smoke-test/
-test-results/
-playwright-report/
-
-# Auto-generated types (endpoint-specific, varies per developer)
-shared/appkit-types/serving.d.ts
