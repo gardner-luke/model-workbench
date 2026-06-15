@@ -1,0 +1,5 @@
+command: ['npm', 'run', 'start']
+env:
+  - name: 'DASHBOARD_URL'
+    description: 'Published Lakeview dashboard URL (optional — enables the Analytics nav link)'
+    # value: 'https://<YOUR_WORKSPACE>.cloud.databricks.com/dashboardsv3/<DASHBOARD_ID>/published'

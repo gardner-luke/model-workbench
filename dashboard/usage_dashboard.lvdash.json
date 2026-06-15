@@ -1,0 +1,394 @@
+{
+  "datasets": [
+    {
+      "name": "kpi_summary",
+      "displayName": "Last 7 days KPIs",
+      "queryLines": [
+        "WITH all_eps AS (\n",
+        "  SELECT DISTINCT served_entity_id, endpoint_name, entity_name\n",
+        "  FROM system.serving.served_entities\n",
+        "),\n",
+        "filtered AS (\n",
+        "  SELECT\n",
+        "    eu.served_entity_id,\n",
+        "    eu.status_code,\n",
+        "    eu.request_time,\n",
+        "    coalesce(ep.endpoint_name, '?') AS endpoint_name,\n",
+        "    CASE\n",
+        "      WHEN ep.entity_name LIKE '<YOUR_CATALOG>.model_workbench.%' THEN 'custom'\n",
+        "      WHEN element_at(eu.usage_context, 'app') = 'model-workbench' THEN 'fmapi'\n",
+        "      ELSE NULL\n",
+        "    END AS source\n",
+        "  FROM system.serving.endpoint_usage eu\n",
+        "  LEFT JOIN all_eps ep USING (served_entity_id)\n",
+        "  WHERE eu.request_time >= current_timestamp() - INTERVAL 7 DAYS\n",
+        ")\n",
+        "SELECT\n",
+        "  count(*) AS invocations_7d,\n",
+        "  ROUND(100.0 * sum(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) / NULLIF(count(*), 0), 2) AS error_rate_pct,\n",
+        "  COUNT(DISTINCT endpoint_name) AS endpoints_7d\n",
+        "FROM filtered\n",
+        "WHERE source IS NOT NULL\n"
+      ]
+    },
+    {
+      "name": "kpi_cost",
+      "displayName": "Last 7 days cost (USD) — custom endpoints only",
+      "queryLines": [
+        "-- Custom endpoints hosted in our app's UC schema. Cost is direct from billing.usage.\n",
+        "-- FMAPI cost attribution per-app is not in billing.usage; the per-endpoint table\n",
+        "-- below approximates it from token counts × list_prices for the 'fmapi' rows.\n",
+        "SELECT round(sum(u.usage_quantity * coalesce(lp.pricing.default, 0)), 2) AS cost_7d_usd\n",
+        "FROM system.billing.usage u\n",
+        "LEFT JOIN system.billing.list_prices lp\n",
+        "  ON u.sku_name = lp.sku_name AND u.usage_unit = lp.usage_unit\n",
+        "  AND u.usage_start_time >= lp.price_start_time\n",
+        "  AND (lp.price_end_time IS NULL OR u.usage_start_time < lp.price_end_time)\n",
+        "WHERE u.workspace_id = '<YOUR_WORKSPACE_ID>'\n",
+        "  AND u.usage_metadata.endpoint_name IN (\n",
+        "    SELECT DISTINCT endpoint_name\n",
+        "    FROM system.serving.served_entities\n",
+        "    WHERE workspace_id = '<YOUR_WORKSPACE_ID>'\n",
+        "      AND entity_name LIKE '<YOUR_CATALOG>.model_workbench.%'\n",
+        "  )\n",
+        "  AND u.usage_date >= current_date() - 7\n"
+      ]
+    },
+    {
+      "name": "usage_daily",
+      "displayName": "Daily invocations by endpoint (30d)",
+      "queryLines": [
+        "WITH all_eps AS (\n",
+        "  SELECT DISTINCT served_entity_id, endpoint_name, entity_name\n",
+        "  FROM system.serving.served_entities\n",
+        ")\n",
+        "SELECT\n",
+        "  date_trunc('DAY', eu.request_time) AS day,\n",
+        "  ep.endpoint_name,\n",
+        "  count(*) AS invocations\n",
+        "FROM system.serving.endpoint_usage eu\n",
+        "LEFT JOIN all_eps ep USING (served_entity_id)\n",
+        "WHERE eu.request_time >= current_timestamp() - INTERVAL 30 DAYS\n",
+        "  AND (\n",
+        "    ep.entity_name LIKE '<YOUR_CATALOG>.model_workbench.%'\n",
+        "    OR element_at(eu.usage_context, 'app') = 'model-workbench'\n",
+        "  )\n",
+        "GROUP BY 1, 2\n",
+        "ORDER BY 1\n"
+      ]
+    },
+    {
+      "name": "cost_daily",
+      "displayName": "Daily cost by endpoint (30d, USD) — custom endpoints",
+      "queryLines": [
+        "SELECT\n",
+        "  u.usage_date AS day,\n",
+        "  u.usage_metadata.endpoint_name AS endpoint_name,\n",
+        "  round(sum(u.usage_quantity * coalesce(lp.pricing.default, 0)), 4) AS cost_usd\n",
+        "FROM system.billing.usage u\n",
+        "LEFT JOIN system.billing.list_prices lp\n",
+        "  ON u.sku_name = lp.sku_name AND u.usage_unit = lp.usage_unit\n",
+        "  AND u.usage_start_time >= lp.price_start_time\n",
+        "  AND (lp.price_end_time IS NULL OR u.usage_start_time < lp.price_end_time)\n",
+        "WHERE u.workspace_id = '<YOUR_WORKSPACE_ID>'\n",
+        "  AND u.usage_metadata.endpoint_name IN (\n",
+        "    SELECT DISTINCT endpoint_name\n",
+        "    FROM system.serving.served_entities\n",
+        "    WHERE workspace_id = '<YOUR_WORKSPACE_ID>'\n",
+        "      AND entity_name LIKE '<YOUR_CATALOG>.model_workbench.%'\n",
+        "  )\n",
+        "  AND u.usage_date >= current_date() - 30\n",
+        "GROUP BY 1, 2\n",
+        "ORDER BY 1, cost_usd DESC\n"
+      ]
+    },
+    {
+      "name": "endpoint_detail",
+      "displayName": "Per-endpoint summary (last 7d) — app-attributed only",
+      "queryLines": [
+        "WITH all_eps AS (\n",
+        "  SELECT DISTINCT served_entity_id, endpoint_name, entity_name\n",
+        "  FROM system.serving.served_entities\n",
+        "),\n",
+        "u7 AS (\n",
+        "  -- Invocations attributable to this app: custom endpoints in our UC schema,\n",
+        "  -- plus any FMAPI call tagged with usage_context.app = 'model-workbench'.\n",
+        "  SELECT\n",
+        "    coalesce(ep.endpoint_name, '?') AS endpoint_name,\n",
+        "    CASE\n",
+        "      WHEN ep.entity_name LIKE '<YOUR_CATALOG>.model_workbench.%' THEN 'custom'\n",
+        "      ELSE 'fmapi'\n",
+        "    END AS kind,\n",
+        "    count(*) AS invocations_7d,\n",
+        "    sum(CASE WHEN eu.status_code >= 400 THEN 1 ELSE 0 END) AS errors_7d,\n",
+        "    coalesce(sum(eu.input_token_count), 0) AS input_tokens_7d,\n",
+        "    coalesce(sum(eu.output_token_count), 0) AS output_tokens_7d,\n",
+        "    max(eu.request_time) AS last_call\n",
+        "  FROM system.serving.endpoint_usage eu\n",
+        "  LEFT JOIN all_eps ep USING (served_entity_id)\n",
+        "  WHERE eu.request_time >= current_timestamp() - INTERVAL 7 DAYS\n",
+        "    AND (\n",
+        "      ep.entity_name LIKE '<YOUR_CATALOG>.model_workbench.%'\n",
+        "      OR element_at(eu.usage_context, 'app') = 'model-workbench'\n",
+        "    )\n",
+        "  GROUP BY 1, 2\n",
+        "),\n",
+        "c7 AS (\n",
+        "  -- Cost attribution. For custom endpoints we read billing.usage directly.\n",
+        "  -- For FMAPI we'd need to derive from tokens × list_prices — left null in v1.\n",
+        "  SELECT\n",
+        "    u.usage_metadata.endpoint_name AS endpoint_name,\n",
+        "    round(sum(u.usage_quantity * coalesce(lp.pricing.default, 0)), 4) AS cost_7d_usd\n",
+        "  FROM system.billing.usage u\n",
+        "  LEFT JOIN system.billing.list_prices lp\n",
+        "    ON u.sku_name = lp.sku_name AND u.usage_unit = lp.usage_unit\n",
+        "    AND u.usage_start_time >= lp.price_start_time\n",
+        "    AND (lp.price_end_time IS NULL OR u.usage_start_time < lp.price_end_time)\n",
+        "  WHERE u.workspace_id = '<YOUR_WORKSPACE_ID>'\n",
+        "    AND u.usage_metadata.endpoint_name IN (\n",
+        "      SELECT DISTINCT endpoint_name\n",
+        "      FROM system.serving.served_entities\n",
+        "      WHERE workspace_id = '<YOUR_WORKSPACE_ID>'\n",
+        "        AND entity_name LIKE '<YOUR_CATALOG>.model_workbench.%'\n",
+        "    )\n",
+        "    AND u.usage_date >= current_date() - 7\n",
+        "  GROUP BY 1\n",
+        ")\n",
+        "SELECT\n",
+        "  u7.endpoint_name,\n",
+        "  u7.kind,\n",
+        "  u7.invocations_7d,\n",
+        "  coalesce(c7.cost_7d_usd, 0) AS cost_7d_usd,\n",
+        "  u7.errors_7d,\n",
+        "  ROUND(100.0 * u7.errors_7d / NULLIF(u7.invocations_7d, 0), 2) AS error_rate_pct,\n",
+        "  u7.input_tokens_7d + u7.output_tokens_7d AS tokens_7d,\n",
+        "  u7.last_call\n",
+        "FROM u7 LEFT JOIN c7 USING (endpoint_name)\n",
+        "ORDER BY cost_7d_usd DESC NULLS LAST, invocations_7d DESC\n"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "overview",
+      "displayName": "Overview",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "title",
+            "multilineTextboxSpec": {
+              "lines": ["## Model Workbench — Usage & Cost"]
+            }
+          },
+          "position": {"x": 0, "y": 0, "width": 6, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "subtitle",
+            "multilineTextboxSpec": {
+              "lines": ["Scoped to this app only — custom endpoints in our UC schema plus FMAPI calls tagged with usage_context.app=model-workbench. Cost data delayed up to 24h. FMAPI per-app cost is approximated by tokens × list_prices."]
+            }
+          },
+          "position": {"x": 0, "y": 1, "width": 6, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "kpi_invocations",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "kpi_summary",
+                "fields": [{"name": "invocations_7d", "expression": "`invocations_7d`"}],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {"fieldName": "invocations_7d", "displayName": "Invocations (7d)"}
+              },
+              "frame": {"showTitle": true, "title": "Invocations (7d)"}
+            }
+          },
+          "position": {"x": 0, "y": 2, "width": 2, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi_cost",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "kpi_cost",
+                "fields": [{"name": "cost_7d_usd", "expression": "`cost_7d_usd`"}],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {"fieldName": "cost_7d_usd", "displayName": "Custom serving cost (7d, USD)"}
+              },
+              "frame": {"showTitle": true, "title": "Custom serving cost (7d, USD)"}
+            }
+          },
+          "position": {"x": 2, "y": 2, "width": 2, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "kpi_error_rate",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "kpi_summary",
+                "fields": [{"name": "error_rate_pct", "expression": "`error_rate_pct`"}],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {"fieldName": "error_rate_pct", "displayName": "Error rate % (7d)"}
+              },
+              "frame": {"showTitle": true, "title": "Error rate % (7d)"}
+            }
+          },
+          "position": {"x": 4, "y": 2, "width": 2, "height": 3}
+        },
+        {
+          "widget": {
+            "name": "trends-header",
+            "multilineTextboxSpec": {
+              "lines": ["### Trends — last 30 days"]
+            }
+          },
+          "position": {"x": 0, "y": 5, "width": 6, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "chart_usage_daily",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "usage_daily",
+                "fields": [
+                  {"name": "day", "expression": "`day`"},
+                  {"name": "endpoint_name", "expression": "`endpoint_name`"},
+                  {"name": "invocations", "expression": "`invocations`"}
+                ],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "day", "scale": {"type": "temporal"}, "displayName": "Day"},
+                "y": {"fieldName": "invocations", "scale": {"type": "quantitative"}, "displayName": "Invocations"},
+                "color": {"fieldName": "endpoint_name", "scale": {"type": "categorical"}, "displayName": "Endpoint"}
+              },
+              "frame": {"showTitle": true, "title": "Invocations per day (this app only)"}
+            }
+          },
+          "position": {"x": 0, "y": 6, "width": 3, "height": 6}
+        },
+        {
+          "widget": {
+            "name": "chart_cost_daily",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "cost_daily",
+                "fields": [
+                  {"name": "day", "expression": "`day`"},
+                  {"name": "endpoint_name", "expression": "`endpoint_name`"},
+                  {"name": "cost_usd", "expression": "`cost_usd`"}
+                ],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {"fieldName": "day", "scale": {"type": "temporal"}, "displayName": "Day"},
+                "y": {"fieldName": "cost_usd", "scale": {"type": "quantitative"}, "displayName": "Cost (USD)"},
+                "color": {"fieldName": "endpoint_name", "scale": {"type": "categorical"}, "displayName": "Endpoint"}
+              },
+              "frame": {"showTitle": true, "title": "Custom endpoint cost per day"}
+            }
+          },
+          "position": {"x": 3, "y": 6, "width": 3, "height": 6}
+        }
+      ]
+    },
+    {
+      "name": "endpoints",
+      "displayName": "Endpoints",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "endpoints-title",
+            "multilineTextboxSpec": {
+              "lines": ["## Endpoints — last 7 days (this app only)"]
+            }
+          },
+          "position": {"x": 0, "y": 0, "width": 6, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "endpoints-subtitle",
+            "multilineTextboxSpec": {
+              "lines": ["Kind = custom (our GPU endpoints) or fmapi (token-billed Foundation Model APIs). Cost shown for custom endpoints only; for FMAPI, multiply tokens by published per-token rate."]
+            }
+          },
+          "position": {"x": 0, "y": 1, "width": 6, "height": 1}
+        },
+        {
+          "widget": {
+            "name": "endpoint_table",
+            "queries": [{
+              "name": "main_query",
+              "query": {
+                "datasetName": "endpoint_detail",
+                "fields": [
+                  {"name": "endpoint_name", "expression": "`endpoint_name`"},
+                  {"name": "kind", "expression": "`kind`"},
+                  {"name": "invocations_7d", "expression": "`invocations_7d`"},
+                  {"name": "cost_7d_usd", "expression": "`cost_7d_usd`"},
+                  {"name": "errors_7d", "expression": "`errors_7d`"},
+                  {"name": "error_rate_pct", "expression": "`error_rate_pct`"},
+                  {"name": "tokens_7d", "expression": "`tokens_7d`"},
+                  {"name": "last_call", "expression": "`last_call`"}
+                ],
+                "disaggregated": true
+              }
+            }],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {"fieldName": "endpoint_name", "displayName": "Endpoint"},
+                  {"fieldName": "kind", "displayName": "Kind"},
+                  {"fieldName": "invocations_7d", "displayName": "Invocations 7d"},
+                  {"fieldName": "cost_7d_usd", "displayName": "Cost 7d (USD)"},
+                  {"fieldName": "errors_7d", "displayName": "Errors 7d"},
+                  {"fieldName": "error_rate_pct", "displayName": "Error rate %"},
+                  {"fieldName": "tokens_7d", "displayName": "Tokens 7d (FMAPI)"},
+                  {"fieldName": "last_call", "displayName": "Last call"}
+                ]
+              },
+              "frame": {"showTitle": true, "title": "Per-endpoint detail"}
+            }
+          },
+          "position": {"x": 0, "y": 2, "width": 6, "height": 8}
+        }
+      ]
+    }
+  ]
+}
