@@ -66,7 +66,7 @@ for notebook_name, endpoint_name in MODELS.items():
     full_path = f"{base_path}/{notebook_name}"
     print(f"Running {notebook_name}...")
     try:
-        dbutils.notebook.run(full_path, timeout_seconds=1800, arguments={
+        dbutils.notebook.run(full_path, timeout_seconds=1200, arguments={
             "uc_catalog": UC_CATALOG,
             "hf_token_scope": HF_TOKEN_SCOPE,
             "hf_token_key": HF_TOKEN_KEY,
@@ -78,7 +78,7 @@ for notebook_name, endpoint_name in MODELS.items():
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 3: Create & Deploy the App
+# MAGIC ## Step 3: Create App & Grant Permissions
 
 # COMMAND ----------
 
