@@ -4,9 +4,12 @@
 # MAGIC
 # MAGIC This notebook orchestrates the full deployment:
 # MAGIC 1. Creates a Unity Catalog schema
-# MAGIC 2. Runs each model notebook (register + create endpoint)
+# MAGIC 2. Runs each model notebook in parallel (register model + create endpoint)
 # MAGIC 3. Creates and deploys the Databricks App
-# MAGIC 4. Grants the app's service principal access to all endpoints
+# MAGIC 4. Grants the app's service principal access to all model endpoints
+# MAGIC
+# MAGIC The app shows only the custom models registered by this project plus
+# MAGIC Databricks Foundation Model APIs. New models added to the schema appear automatically.
 # MAGIC
 # MAGIC **Edit the configuration cell below, then Run All.**
 
@@ -14,10 +17,22 @@
 
 # DBTITLE 1,Configuration — edit these values
 UC_CATALOG = ""                        # Your Unity Catalog catalog name
-UC_SCHEMA = "model_workbench"          # Schema name (will be created)
+UC_SCHEMA = "model_workbench"          # Schema name (will be created if needed)
 APP_NAME = "model-workbench"           # Databricks App name (becomes the URL slug)
 
-# SAM 3 requires a gated HuggingFace token. Leave blank to skip.
+# Models to deploy. Each entry maps a notebook path to its serving endpoint name.
+# Comment out any model you don't want to deploy.
+MODELS = {
+    "models/clip": "clip-vit-large-patch14",
+    "models/yolos": "yolos",
+    "models/grounding_dino": "grounding-dino",
+    "models/depth_anything": "depth-anything",
+    "models/yolo26": "yolo26",
+    # "models/sam3": "sam3",             # Requires HF_TOKEN_SCOPE/KEY (gated model)
+}
+
+# HuggingFace token — only needed if sam3 is in the MODELS list above.
+# The token must have access granted to the gated model on huggingface.co.
 HF_TOKEN_SCOPE = ""                    # Databricks secret scope containing your HF token
 HF_TOKEN_KEY = ""                      # Key within that scope
 
@@ -38,41 +53,41 @@ print(f"✓ Schema ready: {UC_CATALOG}.{UC_SCHEMA}")
 # MAGIC %md
 # MAGIC ## Step 2: Register Models & Create Endpoints
 # MAGIC
-# MAGIC Each model has its own notebook in `models/`. Add new models by creating a new
-# MAGIC notebook there and adding it to the list below.
+# MAGIC Each model has its own notebook in `models/`. They run in parallel for faster setup.
+# MAGIC Add new models by creating a notebook there and adding it to the `MODELS` dict above.
 
 # COMMAND ----------
 
-# DBTITLE 1,Run model notebooks
-import os
+# DBTITLE 1,Run model notebooks in parallel
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 notebook_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
 base_path = "/".join(notebook_path.split("/")[:-1])
 
-models = [
-    "models/clip",
-    "models/yolos",
-    "models/grounding_dino",
-    "models/depth_anything",
-]
+def run_model(notebook_name):
+    full_path = f"{base_path}/{notebook_name}"
+    dbutils.notebook.run(full_path, timeout_seconds=1800, arguments={
+        "uc_catalog": UC_CATALOG,
+        "hf_token_scope": HF_TOKEN_SCOPE,
+        "hf_token_key": HF_TOKEN_KEY,
+    })
+    return notebook_name
 
-if HF_TOKEN_SCOPE and HF_TOKEN_KEY:
-    models.append("models/sam3")
-else:
-    print("⏭ SAM 3 skipped (no HF token configured)")
+print(f"Deploying {len(MODELS)} models in parallel...")
+results = {}
+with ThreadPoolExecutor(max_workers=len(MODELS)) as pool:
+    futures = {pool.submit(run_model, nb): nb for nb in MODELS.keys()}
+    for future in as_completed(futures):
+        nb = futures[future]
+        try:
+            future.result()
+            results[nb] = "✓"
+            print(f"  ✓ {nb}")
+        except Exception as e:
+            results[nb] = f"✗ {e}"
+            print(f"  ✗ {nb}: {e}")
 
-for model in models:
-    full_path = f"{base_path}/{model}"
-    print(f"Running {model}...")
-    try:
-        dbutils.notebook.run(full_path, timeout_seconds=1800, arguments={
-            "uc_catalog": UC_CATALOG,
-            "hf_token_scope": HF_TOKEN_SCOPE,
-            "hf_token_key": HF_TOKEN_KEY,
-        })
-        print(f"  ✓ {model} done")
-    except Exception as e:
-        print(f"  ✗ {model} failed: {e}")
+print(f"\n{sum(1 for v in results.values() if v == '✓')}/{len(MODELS)} models deployed successfully")
 
 # COMMAND ----------
 
@@ -95,7 +110,7 @@ if resp.status_code == 200:
     app = resp.json()
     print(f"⏭ App '{APP_NAME}' already exists")
 else:
-    payload = {"name": APP_NAME, "description": "Model Workbench — explore every model deployed in your Databricks workspace"}
+    payload = {"name": APP_NAME, "description": "Model Workbench — custom vision models and Foundation Model APIs in one playground"}
     resp = requests.post(f"{HOST}/api/2.0/apps", headers=HEADERS, json=payload)
     resp.raise_for_status()
     app = resp.json()
@@ -107,12 +122,8 @@ else:
 sp_client_id = app.get("service_principal_client_id")
 print(f"  App SP: {app.get('service_principal_name', sp_client_id)}")
 
-# Grant CAN_QUERY on all model endpoints
-ENDPOINT_NAMES = ["clip-vit-large-patch14", "yolos", "grounding-dino", "depth-anything"]
-if HF_TOKEN_SCOPE and HF_TOKEN_KEY:
-    ENDPOINT_NAMES.append("sam3")
-
-for ep_name in ENDPOINT_NAMES:
+# Grant CAN_QUERY on each model endpoint
+for ep_name in MODELS.values():
     r = requests.get(f"{HOST}/api/2.0/serving-endpoints/{ep_name}", headers=HEADERS)
     if r.status_code != 200:
         continue
@@ -133,14 +144,18 @@ for ep_name in ENDPOINT_NAMES:
 # DBTITLE 1,Deploy the app
 notebook_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
 base_path = "/".join(notebook_path.split("/")[:-1])
-app_source_path = f"{base_path}/app"
 
+# The apps API requires an absolute workspace path starting with /Workspace
+app_source_path = f"{base_path}/app"
+if not app_source_path.startswith("/Workspace"):
+    app_source_path = f"/Workspace{app_source_path}"
+
+print(f"Deploying from: {app_source_path}")
 deploy_payload = {"source_code_path": app_source_path}
 resp = requests.post(f"{HOST}/api/2.0/apps/{APP_NAME}/deployments", headers=HEADERS, json=deploy_payload)
 if resp.status_code == 200:
     deployment = resp.json()
-    print(f"✓ Deployment started")
-    print(f"  Source: {app_source_path}")
+    print(f"✓ Deployment started: {deployment.get('deployment_id', '')}")
 else:
     print(f"✗ Deployment failed ({resp.status_code}): {resp.text[:300]}")
     dbutils.notebook.exit(f"Deployment failed: {resp.text[:200]}")
@@ -168,13 +183,14 @@ else:
 # MAGIC %md
 # MAGIC ## Done
 # MAGIC
-# MAGIC Your Model Workbench is deployed. The app auto-discovers all serving endpoints
-# MAGIC in your workspace — the custom models above plus any Foundation Model APIs.
+# MAGIC Your Model Workbench is deployed. The app displays:
+# MAGIC - The custom models registered to `{UC_CATALOG}.model_workbench`
+# MAGIC - Databricks Foundation Model APIs (auto-discovered)
 # MAGIC
 # MAGIC Custom endpoints use scale-to-zero. First request after cold start takes 3–10 min.
 # MAGIC
 # MAGIC ### Adding new models
 # MAGIC
 # MAGIC 1. Create a new notebook in `models/` (copy an existing one as a template)
-# MAGIC 2. Add the notebook name to the `models` list in Step 2 above
+# MAGIC 2. Add the notebook and endpoint name to the `MODELS` dict in the config cell
 # MAGIC 3. Re-run this notebook

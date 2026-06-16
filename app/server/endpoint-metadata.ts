@@ -65,6 +65,16 @@ const METADATA_PATTERNS: MetadataPattern[] = [
     modelCardUrl: 'https://huggingface.co/hustvl/yolos-small',
   },
   {
+    match: /^yolo26$/,
+    description:
+      'Ultralytics YOLO26 Small. State-of-the-art real-time object detection — 80 COCO classes, NMS-free one-to-one head. Faster and more accurate than prior YOLO generations.',
+    speed: 4,
+    cost: 1,
+    quality: 4,
+    recommendedFor: 'Real-time detection, counting, video analytics, edge deployment',
+    modelCardUrl: 'https://docs.ultralytics.com/models/yolo26/',
+  },
+  {
     match: /^depth-anything$/,
     description:
       "Meta's Depth Anything V2 — monocular depth estimation. Single image in, dense per-pixel depth out. Useful for 3D scene understanding, robotics, AR, and any pipeline that needs spatial context from a single camera.",
