@@ -12,7 +12,7 @@ A Databricks App that auto-discovers every model serving endpoint in your worksp
 ## Setup
 
 1. Import this repo into your Databricks workspace (Repos or Workspace Files)
-2. Open `setup.py` as a notebook
+2. Open `setup` as a notebook
 3. Fill in the widgets at the top (catalog name, optional HF token for SAM 3)
 4. **Run All**
 
@@ -23,6 +23,28 @@ The notebook handles everything: model registration, endpoint creation, app depl
 - A Databricks workspace with GPU model serving and Unity Catalog
 - A catalog you have `CREATE SCHEMA` privileges on
 - (Optional) A HuggingFace token with access to `facebook/sam3`, stored as a Databricks secret
+
+## Repo structure
+
+```
+setup.py              ← Orchestrator notebook (run this)
+models/
+  clip.py             ← CLIP ViT-L/14 embeddings
+  yolos.py            ← YOLOS object detection
+  grounding_dino.py   ← Grounding DINO open-vocab detection
+  depth_anything.py   ← Depth Anything V2 depth estimation
+  sam3.py             ← SAM 3 segmentation (optional)
+app/                  ← Databricks App source (React + Node)
+dashboard/            ← Lakeview usage dashboard (optional)
+```
+
+## Adding new models
+
+1. Create a new notebook in `models/` (use any existing one as a template)
+2. Add the notebook path to the `models` list in `setup.py` Step 2
+3. Re-run `setup.py`
+
+The app auto-discovers new endpoints — no app code changes needed.
 
 ## Custom models included
 
