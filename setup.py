@@ -4,7 +4,7 @@
 # MAGIC
 # MAGIC This notebook orchestrates the full deployment:
 # MAGIC 1. Creates a Unity Catalog schema
-# MAGIC 2. Runs each model notebook in parallel (register model + create endpoint)
+# MAGIC 2. Runs each model notebook (register model + create endpoint)
 # MAGIC 3. Creates and deploys the Databricks App
 # MAGIC 4. Grants the app's service principal access to all model endpoints
 # MAGIC
@@ -53,25 +53,27 @@ print(f"✓ Schema ready: {UC_CATALOG}.{UC_SCHEMA}")
 # MAGIC %md
 # MAGIC ## Step 2: Register Models & Create Endpoints
 # MAGIC
-# MAGIC Each model has its own notebook in `models/`. They run in parallel for faster setup.
-# MAGIC Add new models by creating a notebook there and adding it to the `MODELS` dict above.
+# MAGIC Each model has its own notebook in `models/`. Add new models by creating a
+# MAGIC notebook there and adding it to the `MODELS` dict above.
 
 # COMMAND ----------
 
-# DBTITLE 1,Run model notebooks in parallel
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
+# DBTITLE 1,Run model notebooks
 notebook_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
 base_path = "/".join(notebook_path.split("/")[:-1])
 
-def run_model(notebook_name):
+for notebook_name, endpoint_name in MODELS.items():
     full_path = f"{base_path}/{notebook_name}"
-    dbutils.notebook.run(full_path, timeout_seconds=1800, arguments={
-        "uc_catalog": UC_CATALOG,
-        "hf_token_scope": HF_TOKEN_SCOPE,
-        "hf_token_key": HF_TOKEN_KEY,
-    })
-    return notebook_name
+    print(f"Running {notebook_name}...")
+    try:
+        dbutils.notebook.run(full_path, timeout_seconds=1800, arguments={
+            "uc_catalog": UC_CATALOG,
+            "hf_token_scope": HF_TOKEN_SCOPE,
+            "hf_token_key": HF_TOKEN_KEY,
+        })
+        print(f"  ✓ {notebook_name} done")
+    except Exception as e:
+        print(f"  ✗ {notebook_name} failed: {e}")
 
 print(f"Deploying {len(MODELS)} models in parallel...")
 results = {}

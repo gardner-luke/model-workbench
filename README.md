@@ -16,7 +16,7 @@ A Databricks App for exploring custom vision models and Foundation Model APIs in
 3. Edit the configuration cell at the top (catalog, app name, which models to deploy)
 4. **Run All**
 
-The notebook handles everything: schema creation, model registration, endpoint creation, app deployment, and permissions. Models run in parallel for faster setup (~10–15 min).
+The notebook handles everything: schema creation, model registration, endpoint creation, app deployment, and permissions. Takes ~15–20 minutes.
 
 ## Prerequisites
 
