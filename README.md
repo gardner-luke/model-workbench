@@ -28,6 +28,9 @@ The notebook handles everything: schema creation, model registration, endpoint c
 
 ```
 setup.py              ← Orchestrator notebook (run this)
+setup/
+  1_models.py         ← Schema + model registration + endpoints
+  2_app.py            ← App creation + dashboard + deploy
 models/
   clip.py             ← CLIP ViT-L/14 embeddings
   yolo26.py           ← YOLO26 real-time detection (Ultralytics)
@@ -41,8 +44,8 @@ dashboard/            ← Lakeview usage dashboard (optional)
 ## Adding new models
 
 1. Create a new notebook in `models/` (use any existing one as a template)
-2. Add the notebook path and endpoint name to the `MODELS` dict in setup.py
-3. Re-run `setup.py`
+2. Add the notebook path and endpoint name to the `MODELS` dict in `setup.py`
+3. Re-run `setup.py` — or run `setup/1_models` then `setup/2_app` independently
 
 The app auto-discovers any endpoint whose registered model is in the `model_workbench` schema — no app code changes needed.
 
