@@ -148,7 +148,10 @@ import json
 notebook_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
 base_path = "/".join(notebook_path.split("/")[:-1])
 
-workspace_id = spark.conf.get("spark.databricks.clusterUsageTags.orgId")
+try:
+    workspace_id = spark.conf.get("spark.databricks.clusterUsageTags.orgId")
+except Exception:
+    workspace_id = dbutils.notebook.entry_point.getDbutils().notebook().getContext().tags().apply("orgId")
 
 # Read and fill placeholders in the dashboard spec
 dashboard_ws_path = f"{base_path}/dashboard/usage_dashboard.lvdash.json"
