@@ -55,16 +55,6 @@ const METADATA_PATTERNS: MetadataPattern[] = [
     modelCardUrl: 'https://huggingface.co/IDEA-Research/grounding-dino-base',
   },
   {
-    match: /^yolos$/,
-    description:
-      'YOLOS (transformer-based YOLO) trained on COCO 80 classes. No prompt — image in, boxes out for every person/car/object it recognizes. The closed-vocab, fixed-class baseline. Fast and small.',
-    speed: 4,
-    cost: 1,
-    quality: 3,
-    recommendedFor: 'Real-time inference, fixed-class detection, simple object counting',
-    modelCardUrl: 'https://huggingface.co/hustvl/yolos-small',
-  },
-  {
     match: /^yolo26$/,
     description:
       'Ultralytics YOLO26 Small. State-of-the-art real-time object detection — 80 COCO classes, NMS-free one-to-one head. Faster and more accurate than prior YOLO generations.',

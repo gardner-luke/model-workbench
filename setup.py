@@ -25,7 +25,6 @@ APP_NAME = "model-workbench"           # Databricks App name (becomes the URL sl
 # Comment out any model you don't want to deploy.
 MODELS = {
     "models/clip": "clip-vit-large-patch14",
-    "models/yolos": "yolos",
     "models/grounding_dino": "grounding-dino",
     "models/depth_anything": "depth-anything",
     "models/yolo26": "yolo26",
