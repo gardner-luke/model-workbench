@@ -2,57 +2,43 @@
 # MAGIC %md
 # MAGIC # Model Workbench — Setup
 # MAGIC
-# MAGIC This notebook deploys everything you need to run Model Workbench:
-# MAGIC 1. Creates a Unity Catalog schema for the custom models
-# MAGIC 2. Registers each model to UC (CLIP, YOLOS, Grounding DINO, Depth Anything, and optionally SAM 3)
-# MAGIC 3. Creates GPU model serving endpoints with scale-to-zero
-# MAGIC 4. Deploys the Databricks App
+# MAGIC This notebook deploys everything end-to-end:
+# MAGIC 1. Creates a Unity Catalog schema for custom models
+# MAGIC 2. Registers 5 models (CLIP, YOLOS, Grounding DINO, Depth Anything, and optionally SAM 3)
+# MAGIC 3. Creates GPU serving endpoints with scale-to-zero
+# MAGIC 4. Creates and deploys the Databricks App
+# MAGIC 5. Grants the app's service principal access to query all endpoints
 # MAGIC
-# MAGIC **Time to complete**: ~15–20 minutes (most of that is endpoint provisioning).
-# MAGIC
-# MAGIC ### Before you start
-# MAGIC - You need a Unity Catalog catalog you can create schemas in
-# MAGIC - GPU model serving must be available in your workspace
-# MAGIC - (Optional) For SAM 3: a HuggingFace token with access to `facebook/sam3`
-# MAGIC   saved as a Databricks secret
+# MAGIC **Fill in the widgets at the top, then Run All.** Total time: ~15–20 min.
+
+# COMMAND ----------
+
+# DBTITLE 1,Configuration (edit these widgets then Run All)
+dbutils.widgets.text("uc_catalog", "", "Unity Catalog Name")
+dbutils.widgets.text("hf_token_scope", "", "HF Secret Scope (for SAM 3, leave blank to skip)")
+dbutils.widgets.text("hf_token_key", "", "HF Secret Key (for SAM 3, leave blank to skip)")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Configuration
-# MAGIC
-# MAGIC Edit the values below, then **Run All**.
+# MAGIC ## Step 1: Validate & Create Schema
 
 # COMMAND ----------
 
-# DBTITLE 1,Configuration — edit these values
-UC_CATALOG = "<YOUR_CATALOG>"          # Your Unity Catalog catalog name
-UC_SCHEMA = "model_workbench"          # Schema name (will be created if it doesn't exist)
+UC_CATALOG = dbutils.widgets.get("uc_catalog").strip()
+UC_SCHEMA = "model_workbench"
+HF_TOKEN_SCOPE = dbutils.widgets.get("hf_token_scope").strip()
+HF_TOKEN_KEY = dbutils.widgets.get("hf_token_key").strip()
 
-# SAM 3 is a gated HuggingFace model — set these if you want to deploy it.
-# Leave as empty strings to skip SAM 3 deployment.
-HF_TOKEN_SCOPE = ""                    # Databricks secret scope with your HF token
-HF_TOKEN_KEY = ""                      # Key within that scope
+assert UC_CATALOG, "Set the 'uc_catalog' widget to your Unity Catalog name before running"
 
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Step 1: Create UC Schema
-
-# COMMAND ----------
-
-spark.sql(f"CREATE SCHEMA IF NOT EXISTS {UC_CATALOG}.{UC_SCHEMA}")  # noqa: F821
-print(f"✓ Schema {UC_CATALOG}.{UC_SCHEMA} ready")
-
-# Store config so it survives %pip restartPython
-spark.conf.set("spark.databricks.mw.catalog", UC_CATALOG)  # noqa: F821
-spark.conf.set("spark.databricks.mw.hfScope", HF_TOKEN_SCOPE)  # noqa: F821
-spark.conf.set("spark.databricks.mw.hfKey", HF_TOKEN_KEY)  # noqa: F821
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {UC_CATALOG}.{UC_SCHEMA}")
+print(f"✓ Schema ready: {UC_CATALOG}.{UC_SCHEMA}")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 2: Register Models
+# MAGIC ## Step 2: Install Dependencies & Register Models
 
 # COMMAND ----------
 
@@ -60,11 +46,11 @@ spark.conf.set("spark.databricks.mw.hfKey", HF_TOKEN_KEY)  # noqa: F821
 
 # COMMAND ----------
 
-dbutils.library.restartPython()  # noqa: F821
+dbutils.library.restartPython()
 
 # COMMAND ----------
 
-# Recover config after restart
+# DBTITLE 1,Recover config from widgets after restartPython
 import base64
 import io
 import os
@@ -76,19 +62,20 @@ import pandas as pd
 import torch
 from mlflow.models.signature import infer_signature
 from PIL import Image
+from transformers import CLIPModel, CLIPProcessor, AutoImageProcessor, YolosForObjectDetection, AutoProcessor, GroundingDinoForObjectDetection, AutoModelForDepthEstimation
 
-UC_CATALOG = spark.conf.get("spark.databricks.mw.catalog")  # noqa: F821
+UC_CATALOG = dbutils.widgets.get("uc_catalog").strip()
 UC_SCHEMA = "model_workbench"
-HF_TOKEN_SCOPE = spark.conf.get("spark.databricks.mw.hfScope", "")  # noqa: F821
-HF_TOKEN_KEY = spark.conf.get("spark.databricks.mw.hfKey", "")  # noqa: F821
-
-# Tiny test image reused across all registrations
-_tiny_buf = io.BytesIO()
-Image.new("RGB", (4, 4), color=(255, 0, 0)).save(_tiny_buf, format="PNG")
-_tiny_b64 = base64.b64encode(_tiny_buf.getvalue()).decode("ascii")
+HF_TOKEN_SCOPE = dbutils.widgets.get("hf_token_scope").strip()
+HF_TOKEN_KEY = dbutils.widgets.get("hf_token_key").strip()
 
 mlflow.set_registry_uri("databricks-uc")
-print(f"Config: catalog={UC_CATALOG}, schema={UC_SCHEMA}")
+
+_buf = io.BytesIO()
+Image.new("RGB", (4, 4), color=(255, 0, 0)).save(_buf, format="PNG")
+TINY_IMG = base64.b64encode(_buf.getvalue()).decode("ascii")
+
+print(f"Config: {UC_CATALOG}.{UC_SCHEMA} | SAM 3: {'enabled' if HF_TOKEN_SCOPE else 'skipped'}")
 
 # COMMAND ----------
 
@@ -96,8 +83,6 @@ print(f"Config: catalog={UC_CATALOG}, schema={UC_SCHEMA}")
 # MAGIC ### CLIP (text + image embeddings)
 
 # COMMAND ----------
-
-from transformers import CLIPModel, CLIPProcessor
 
 HF_MODEL_CLIP = "openai/clip-vit-large-patch14"
 UC_NAME_CLIP = f"{UC_CATALOG}.{UC_SCHEMA}.clip_vit_large_patch14"
@@ -116,43 +101,41 @@ class CLIPEmbeddingModel(mlflow.pyfunc.PythonModel):
         return Image.open(io.BytesIO(base64.b64decode(value))).convert("RGB")
 
     def predict(self, context: Any, model_input: pd.DataFrame, params: Any = None) -> list[list[float]]:
-        records = model_input.to_dict(orient="records") if isinstance(model_input, pd.DataFrame) else list(model_input)
+        records = model_input.to_dict(orient="records")
         texts, images = [], []
         for idx, r in enumerate(records):
-            t = str(r.get("type", "")).lower()
-            v = r.get("value", "")
-            if t == "text":
-                texts.append((idx, str(v)))
-            elif t == "image":
-                images.append((idx, self._decode_image(str(v))))
+            if str(r.get("type", "")).lower() == "text":
+                texts.append((idx, str(r["value"])))
+            else:
+                images.append((idx, self._decode_image(str(r["value"]))))
         embeddings: list[list[float]] = [[] for _ in records]
         with torch.inference_mode():
             if texts:
-                idxs, values = zip(*texts)
-                inp = self.processor(text=list(values), return_tensors="pt", padding=True, truncation=True)
+                idxs, vals = zip(*texts)
+                inp = self.processor(text=list(vals), return_tensors="pt", padding=True, truncation=True)
                 inp = {k: v.to(self.device) for k, v in inp.items()}
                 feats = self.model.get_text_features(**inp)
                 feats = (feats / feats.norm(dim=-1, keepdim=True)).cpu().numpy()
-                for j, idx in enumerate(idxs):
-                    embeddings[idx] = feats[j].tolist()
+                for j, i in enumerate(idxs):
+                    embeddings[i] = feats[j].tolist()
             if images:
-                idxs, values = zip(*images)
-                inp = self.processor(images=list(values), return_tensors="pt")
+                idxs, vals = zip(*images)
+                inp = self.processor(images=list(vals), return_tensors="pt")
                 inp = {k: v.to(self.device) for k, v in inp.items()}
                 feats = self.model.get_image_features(**inp)
                 feats = (feats / feats.norm(dim=-1, keepdim=True)).cpu().numpy()
-                for j, idx in enumerate(idxs):
-                    embeddings[idx] = feats[j].tolist()
+                for j, i in enumerate(idxs):
+                    embeddings[i] = feats[j].tolist()
         return embeddings
 
 
-input_ex = pd.DataFrame([{"type": "text", "value": "hello"}, {"type": "image", "value": _tiny_b64}])
-sig = infer_signature(input_ex, [[0.0] * 768, [0.0] * 768])
-
+_in = pd.DataFrame([{"type": "text", "value": "hello"}, {"type": "image", "value": TINY_IMG}])
+_sig = infer_signature(_in, [[0.0] * 768, [0.0] * 768])
 with mlflow.start_run(run_name="clip-register"):
-    mlflow.pyfunc.log_model("clip-pyfunc", python_model=CLIPEmbeddingModel(), signature=sig, input_example=input_ex,
-                            pip_requirements=["mlflow", "transformers==4.46.3", "pillow", "torch"], registered_model_name=UC_NAME_CLIP)
-print(f"✓ CLIP registered to {UC_NAME_CLIP}")
+    mlflow.pyfunc.log_model("model", python_model=CLIPEmbeddingModel(), signature=_sig, input_example=_in,
+                            pip_requirements=["mlflow", "transformers==4.46.3", "pillow", "torch"],
+                            registered_model_name=UC_NAME_CLIP)
+print(f"✓ CLIP → {UC_NAME_CLIP}")
 
 # COMMAND ----------
 
@@ -160,8 +143,6 @@ print(f"✓ CLIP registered to {UC_NAME_CLIP}")
 # MAGIC ### YOLOS (closed-vocab object detection)
 
 # COMMAND ----------
-
-from transformers import AutoImageProcessor, YolosForObjectDetection
 
 HF_MODEL_YOLOS = "hustvl/yolos-small"
 UC_NAME_YOLOS = f"{UC_CATALOG}.{UC_SCHEMA}.yolos"
@@ -181,7 +162,7 @@ class YolosModel(mlflow.pyfunc.PythonModel):
         return Image.open(io.BytesIO(base64.b64decode(value))).convert("RGB")
 
     def predict(self, context: Any, model_input: pd.DataFrame, params: Any = None) -> list[dict]:
-        records = model_input.to_dict(orient="records") if isinstance(model_input, pd.DataFrame) else list(model_input)
+        records = model_input.to_dict(orient="records")
         outputs = []
         with torch.inference_mode():
             for r in records:
@@ -191,22 +172,22 @@ class YolosModel(mlflow.pyfunc.PythonModel):
                 inp = self.processor(images=image, return_tensors="pt").to(self.device)
                 raw = self.model(**inp)
                 res = self.processor.post_process_object_detection(raw, threshold=threshold, target_sizes=torch.tensor([(h, w)]))[0]
-                boxes = res["boxes"].detach().cpu().numpy()
-                scores = res["scores"].detach().cpu().numpy()
-                labels = res["labels"].detach().cpu().numpy()
-                outputs.append({"boxes": boxes.tolist(), "scores": scores.tolist(),
-                                "labels": [self.id2label.get(int(l), str(int(l))) for l in labels],
-                                "count": len(boxes), "image_size": [w, h]})
+                outputs.append({
+                    "boxes": res["boxes"].cpu().numpy().tolist(),
+                    "scores": res["scores"].cpu().numpy().tolist(),
+                    "labels": [self.id2label.get(int(l), str(int(l))) for l in res["labels"].cpu().numpy()],
+                    "count": len(res["boxes"]), "image_size": [w, h]
+                })
         return outputs
 
 
-input_ex = pd.DataFrame([{"image": _tiny_b64, "threshold": 0.3}])
-sig = infer_signature(input_ex, [{"boxes": [[0.0]*4], "scores": [0.9], "labels": ["person"], "count": 1, "image_size": [4, 4]}])
-
+_in = pd.DataFrame([{"image": TINY_IMG, "threshold": 0.3}])
+_sig = infer_signature(_in, [{"boxes": [[0.0]*4], "scores": [0.9], "labels": ["person"], "count": 1, "image_size": [4, 4]}])
 with mlflow.start_run(run_name="yolos-register"):
-    mlflow.pyfunc.log_model("yolos-pyfunc", python_model=YolosModel(), signature=sig, input_example=input_ex,
-                            pip_requirements=["mlflow", "transformers==4.46.3", "pillow", "torch"], registered_model_name=UC_NAME_YOLOS)
-print(f"✓ YOLOS registered to {UC_NAME_YOLOS}")
+    mlflow.pyfunc.log_model("model", python_model=YolosModel(), signature=_sig, input_example=_in,
+                            pip_requirements=["mlflow", "transformers==4.46.3", "pillow", "torch"],
+                            registered_model_name=UC_NAME_YOLOS)
+print(f"✓ YOLOS → {UC_NAME_YOLOS}")
 
 # COMMAND ----------
 
@@ -214,8 +195,6 @@ print(f"✓ YOLOS registered to {UC_NAME_YOLOS}")
 # MAGIC ### Grounding DINO (open-vocab object detection)
 
 # COMMAND ----------
-
-from transformers import AutoProcessor, GroundingDinoForObjectDetection
 
 HF_MODEL_GDINO = "IDEA-Research/grounding-dino-base"
 UC_NAME_GDINO = f"{UC_CATALOG}.{UC_SCHEMA}.grounding_dino"
@@ -234,13 +213,13 @@ class GroundingDinoModel(mlflow.pyfunc.PythonModel):
         return Image.open(io.BytesIO(base64.b64decode(value))).convert("RGB")
 
     def predict(self, context: Any, model_input: pd.DataFrame, params: Any = None) -> list[dict]:
-        records = model_input.to_dict(orient="records") if isinstance(model_input, pd.DataFrame) else list(model_input)
+        records = model_input.to_dict(orient="records")
         outputs = []
         with torch.inference_mode():
             for r in records:
                 image = self._decode_image(str(r["image"]))
                 w, h = image.size
-                text = (r.get("text_prompt") or "object .").strip()
+                text = (r.get("text_prompt") or "object.").strip()
                 concepts = [c.strip() for c in text.replace(",", ".").split(".") if c.strip()]
                 normalized = ". ".join(concepts) + "."
                 threshold = float(r.get("threshold") or 0.3)
@@ -248,21 +227,23 @@ class GroundingDinoModel(mlflow.pyfunc.PythonModel):
                 raw = self.model(**inp)
                 res = self.processor.post_process_grounded_object_detection(
                     raw, inp.input_ids, box_threshold=threshold, text_threshold=0.25, target_sizes=[(h, w)])[0]
-                boxes = res["boxes"].detach().cpu().numpy() if res.get("boxes") is not None and len(res["boxes"]) else np.empty((0, 4))
-                scores = res["scores"].detach().cpu().numpy() if res.get("scores") is not None and len(res["scores"]) else np.empty((0,))
+                boxes = res["boxes"].cpu().numpy() if len(res.get("boxes", [])) else np.empty((0, 4))
+                scores = res["scores"].cpu().numpy() if len(res.get("scores", [])) else np.empty((0,))
                 labels = res.get("text_labels") or res.get("labels") or []
-                outputs.append({"boxes": boxes.tolist(), "scores": scores.tolist(),
-                                "labels": [str(l) for l in labels], "count": len(boxes), "image_size": [w, h]})
+                outputs.append({
+                    "boxes": boxes.tolist(), "scores": scores.tolist(),
+                    "labels": [str(l) for l in labels], "count": len(boxes), "image_size": [w, h]
+                })
         return outputs
 
 
-input_ex = pd.DataFrame([{"image": _tiny_b64, "text_prompt": "red square.", "threshold": 0.3}])
-sig = infer_signature(input_ex, [{"boxes": [[0.0]*4], "scores": [0.9], "labels": ["red square"], "count": 1, "image_size": [4, 4]}])
-
+_in = pd.DataFrame([{"image": TINY_IMG, "text_prompt": "red square.", "threshold": 0.3}])
+_sig = infer_signature(_in, [{"boxes": [[0.0]*4], "scores": [0.9], "labels": ["red square"], "count": 1, "image_size": [4, 4]}])
 with mlflow.start_run(run_name="grounding-dino-register"):
-    mlflow.pyfunc.log_model("grounding-dino-pyfunc", python_model=GroundingDinoModel(), signature=sig, input_example=input_ex,
-                            pip_requirements=["mlflow", "transformers==4.46.3", "pillow", "torch"], registered_model_name=UC_NAME_GDINO)
-print(f"✓ Grounding DINO registered to {UC_NAME_GDINO}")
+    mlflow.pyfunc.log_model("model", python_model=GroundingDinoModel(), signature=_sig, input_example=_in,
+                            pip_requirements=["mlflow", "transformers==4.46.3", "pillow", "torch"],
+                            registered_model_name=UC_NAME_GDINO)
+print(f"✓ Grounding DINO → {UC_NAME_GDINO}")
 
 # COMMAND ----------
 
@@ -270,8 +251,6 @@ print(f"✓ Grounding DINO registered to {UC_NAME_GDINO}")
 # MAGIC ### Depth Anything V2 (monocular depth estimation)
 
 # COMMAND ----------
-
-from transformers import AutoModelForDepthEstimation
 
 HF_MODEL_DEPTH = "depth-anything/Depth-Anything-V2-Large-hf"
 UC_NAME_DEPTH = f"{UC_CATALOG}.{UC_SCHEMA}.depth_anything"
@@ -290,7 +269,7 @@ class DepthAnythingModel(mlflow.pyfunc.PythonModel):
         return Image.open(io.BytesIO(base64.b64decode(value))).convert("RGB")
 
     def predict(self, context: Any, model_input: pd.DataFrame, params: Any = None) -> list[dict]:
-        records = model_input.to_dict(orient="records") if isinstance(model_input, pd.DataFrame) else list(model_input)
+        records = model_input.to_dict(orient="records")
         outputs = []
         with torch.inference_mode():
             for r in records:
@@ -303,33 +282,33 @@ class DepthAnythingModel(mlflow.pyfunc.PythonModel):
                 ).squeeze().cpu().numpy()
                 d_min, d_max = float(depth.min()), float(depth.max())
                 norm = (depth - d_min) / (d_max - d_min) * 255.0 if d_max - d_min > 1e-9 else np.zeros_like(depth)
-                img = Image.fromarray(norm.astype(np.uint8), mode="L")
                 buf = io.BytesIO()
-                img.save(buf, format="PNG", optimize=True)
-                outputs.append({"depth_png": base64.b64encode(buf.getvalue()).decode("ascii"),
-                                "min_depth": d_min, "max_depth": d_max, "image_size": [w, h]})
+                Image.fromarray(norm.astype(np.uint8), mode="L").save(buf, format="PNG", optimize=True)
+                outputs.append({
+                    "depth_png": base64.b64encode(buf.getvalue()).decode("ascii"),
+                    "min_depth": d_min, "max_depth": d_max, "image_size": [w, h]
+                })
         return outputs
 
 
-input_ex = pd.DataFrame([{"image": _tiny_b64}])
-sig = infer_signature(input_ex, [{"depth_png": "<b64>", "min_depth": 0.0, "max_depth": 1.0, "image_size": [4, 4]}])
-
+_in = pd.DataFrame([{"image": TINY_IMG}])
+_sig = infer_signature(_in, [{"depth_png": "x", "min_depth": 0.0, "max_depth": 1.0, "image_size": [4, 4]}])
 with mlflow.start_run(run_name="depth-anything-register"):
-    mlflow.pyfunc.log_model("depth-anything-pyfunc", python_model=DepthAnythingModel(), signature=sig, input_example=input_ex,
-                            pip_requirements=["mlflow", "transformers==4.46.3", "pillow", "torch"], registered_model_name=UC_NAME_DEPTH)
-print(f"✓ Depth Anything registered to {UC_NAME_DEPTH}")
+    mlflow.pyfunc.log_model("model", python_model=DepthAnythingModel(), signature=_sig, input_example=_in,
+                            pip_requirements=["mlflow", "transformers==4.46.3", "pillow", "torch"],
+                            registered_model_name=UC_NAME_DEPTH)
+print(f"✓ Depth Anything → {UC_NAME_DEPTH}")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### SAM 3 (optional — promptable segmentation)
-# MAGIC
-# MAGIC Skipped if `HF_TOKEN_SCOPE` is empty. To enable, set it in the Configuration cell above.
+# MAGIC ### SAM 3 (optional — requires gated HuggingFace access)
 
 # COMMAND ----------
 
 if HF_TOKEN_SCOPE and HF_TOKEN_KEY:
-    HF_TOKEN = dbutils.secrets.get(scope=HF_TOKEN_SCOPE, key=HF_TOKEN_KEY).strip()  # noqa: F821
+    HF_TOKEN = dbutils.secrets.get(scope=HF_TOKEN_SCOPE, key=HF_TOKEN_KEY).strip()
+    assert HF_TOKEN and HF_TOKEN.isascii(), "HF token is empty or invalid — check your secret"
     os.environ["HF_TOKEN"] = HF_TOKEN
     os.environ["HUGGINGFACE_HUB_TOKEN"] = HF_TOKEN
 
@@ -338,7 +317,6 @@ if HF_TOKEN_SCOPE and HF_TOKEN_KEY:
 
     from transformers import Sam3Model, Sam3Processor
 
-    HF_MODEL_SAM3 = "facebook/sam3"
     UC_NAME_SAM3 = f"{UC_CATALOG}.{UC_SCHEMA}.sam3"
 
     class Sam3SegmenterModel(mlflow.pyfunc.PythonModel):
@@ -356,7 +334,7 @@ if HF_TOKEN_SCOPE and HF_TOKEN_KEY:
             return Image.open(io.BytesIO(base64.b64decode(value))).convert("RGB")
 
         def predict(self, context: Any, model_input: pd.DataFrame, params: Any = None) -> list[dict]:
-            records = model_input.to_dict(orient="records") if isinstance(model_input, pd.DataFrame) else list(model_input)
+            records = model_input.to_dict(orient="records")
             outputs = []
             with torch.inference_mode():
                 for r in records:
@@ -372,10 +350,8 @@ if HF_TOKEN_SCOPE and HF_TOKEN_KEY:
                     mask_list, box_list, score_list = [], [], []
                     if masks is not None and len(masks) > 0:
                         for m, b, s in zip(masks.cpu().numpy(), boxes.cpu().numpy(), scores.cpu().numpy()):
-                            m2 = np.squeeze(m)
-                            img = Image.fromarray((m2 > 0).astype(np.uint8) * 255, mode="L")
                             buf = io.BytesIO()
-                            img.save(buf, format="PNG", optimize=True)
+                            Image.fromarray((np.squeeze(m) > 0).astype(np.uint8) * 255, mode="L").save(buf, format="PNG")
                             mask_list.append(base64.b64encode(buf.getvalue()).decode("ascii"))
                             box_list.append([float(b[0]), float(b[1]), float(b[2]), float(b[3])])
                             score_list.append(float(s))
@@ -383,16 +359,15 @@ if HF_TOKEN_SCOPE and HF_TOKEN_KEY:
                                     "count": len(mask_list), "image_size": [w, h]})
             return outputs
 
-    input_ex = pd.DataFrame([{"image": _tiny_b64, "text_prompt": "object", "threshold": 0.5, "mask_threshold": 0.5}])
-    sig = infer_signature(input_ex, [{"masks": ["<b64>"], "boxes": [[0.0]*4], "scores": [0.9], "count": 1, "image_size": [4, 4]}])
-
+    _in = pd.DataFrame([{"image": TINY_IMG, "text_prompt": "object", "threshold": 0.5, "mask_threshold": 0.5}])
+    _sig = infer_signature(_in, [{"masks": ["x"], "boxes": [[0.0]*4], "scores": [0.9], "count": 1, "image_size": [4, 4]}])
     with mlflow.start_run(run_name="sam3-register"):
-        mlflow.pyfunc.log_model("sam3-pyfunc", python_model=Sam3SegmenterModel(), signature=sig, input_example=input_ex,
+        mlflow.pyfunc.log_model("model", python_model=Sam3SegmenterModel(), signature=_sig, input_example=_in,
                                 pip_requirements=["mlflow", "transformers==5.8.0", "huggingface_hub>=1.0,<2.0", "accelerate>=0.34.0", "pillow", "torch"],
                                 registered_model_name=UC_NAME_SAM3)
-    print(f"✓ SAM 3 registered to {UC_NAME_SAM3}")
+    print(f"✓ SAM 3 → {UC_NAME_SAM3}")
 else:
-    print("⏭ SAM 3 skipped (no HF token configured)")
+    print("⏭ SAM 3 skipped (no HF token scope/key provided)")
 
 # COMMAND ----------
 
@@ -402,10 +377,11 @@ else:
 # COMMAND ----------
 
 import requests
+import time
 
-host = spark.conf.get("spark.databricks.workspaceUrl")  # noqa: F821
-token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()  # noqa: F821
-headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+HOST = f"https://{spark.conf.get('spark.databricks.workspaceUrl')}"
+TOKEN = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
+HEADERS = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
 
 ENDPOINTS = [
     {"name": "clip-vit-large-patch14", "entity": f"{UC_CATALOG}.{UC_SCHEMA}.clip_vit_large_patch14", "gpu": "GPU_MEDIUM"},
@@ -413,7 +389,6 @@ ENDPOINTS = [
     {"name": "grounding-dino", "entity": f"{UC_CATALOG}.{UC_SCHEMA}.grounding_dino", "gpu": "GPU_SMALL"},
     {"name": "depth-anything", "entity": f"{UC_CATALOG}.{UC_SCHEMA}.depth_anything", "gpu": "GPU_SMALL"},
 ]
-
 if HF_TOKEN_SCOPE and HF_TOKEN_KEY:
     ENDPOINTS.append({
         "name": "sam3", "entity": f"{UC_CATALOG}.{UC_SCHEMA}.sam3", "gpu": "GPU_MEDIUM",
@@ -421,6 +396,7 @@ if HF_TOKEN_SCOPE and HF_TOKEN_KEY:
                      "HUGGINGFACE_HUB_TOKEN": f"{{{{secrets/{HF_TOKEN_SCOPE}/{HF_TOKEN_KEY}}}}}"}
     })
 
+endpoint_ids = {}
 for ep in ENDPOINTS:
     served_entity = {
         "name": ep["name"], "entity_name": ep["entity"], "entity_version": "1",
@@ -428,7 +404,6 @@ for ep in ENDPOINTS:
     }
     if "env_vars" in ep:
         served_entity["environment_vars"] = ep["env_vars"]
-
     payload = {
         "name": ep["name"],
         "config": {
@@ -436,33 +411,102 @@ for ep in ENDPOINTS:
             "traffic_config": {"routes": [{"served_model_name": ep["name"], "traffic_percentage": 100}]},
         },
     }
-    resp = requests.post(f"https://{host}/api/2.0/serving-endpoints", headers=headers, json=payload)
+    resp = requests.post(f"{HOST}/api/2.0/serving-endpoints", headers=HEADERS, json=payload)
     if resp.status_code == 200:
-        print(f"✓ Endpoint '{ep['name']}' created (will be ready in 3–10 min)")
+        endpoint_ids[ep["name"]] = resp.json().get("id")
+        print(f"✓ Endpoint '{ep['name']}' created")
     elif resp.status_code == 409 or "already exists" in resp.text.lower():
+        r2 = requests.get(f"{HOST}/api/2.0/serving-endpoints/{ep['name']}", headers=HEADERS)
+        if r2.status_code == 200:
+            endpoint_ids[ep["name"]] = r2.json().get("id")
         print(f"⏭ Endpoint '{ep['name']}' already exists")
     else:
-        print(f"✗ Endpoint '{ep['name']}' failed: {resp.status_code} — {resp.text[:200]}")
+        print(f"✗ '{ep['name']}' failed ({resp.status_code}): {resp.text[:200]}")
+
+print(f"\n{len(endpoint_ids)} endpoints ready or creating")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 4: Deploy the App
-# MAGIC
-# MAGIC From your local terminal:
-# MAGIC ```
-# MAGIC cd model-workbench
-# MAGIC databricks apps deploy model-workbench
-# MAGIC ```
-# MAGIC
-# MAGIC The app auto-discovers all serving endpoints in your workspace. Custom endpoints
-# MAGIC will show as "Not Ready" until cold start completes. Foundation Model APIs appear immediately.
+# MAGIC ## Step 4: Create & Deploy the App
+
+# COMMAND ----------
+
+# DBTITLE 1,Create the app
+import json
+
+APP_NAME = "model-workbench"
+notebook_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
+source_path = "/".join(notebook_path.split("/")[:-1])
+
+resp = requests.get(f"{HOST}/api/2.0/apps/{APP_NAME}", headers=HEADERS)
+if resp.status_code == 200:
+    app = resp.json()
+    print(f"⏭ App '{APP_NAME}' already exists")
+else:
+    payload = {"name": APP_NAME, "description": "Model Workbench — explore every model deployed in your Databricks workspace"}
+    resp = requests.post(f"{HOST}/api/2.0/apps", headers=HEADERS, json=payload)
+    resp.raise_for_status()
+    app = resp.json()
+    print(f"✓ App '{APP_NAME}' created")
+    time.sleep(5)
+    resp = requests.get(f"{HOST}/api/2.0/apps/{APP_NAME}", headers=HEADERS)
+    app = resp.json()
+
+sp_client_id = app.get("service_principal_client_id")
+print(f"  App SP: {app.get('service_principal_name', sp_client_id)}")
+
+# COMMAND ----------
+
+# DBTITLE 1,Grant CAN_QUERY on each serving endpoint to the app SP
+for ep_name, ep_id in endpoint_ids.items():
+    if not ep_id or not sp_client_id:
+        continue
+    perm_payload = {"access_control_list": [
+        {"service_principal_name": sp_client_id, "permission_level": "CAN_QUERY"}
+    ]}
+    resp = requests.patch(f"{HOST}/api/2.0/permissions/serving-endpoints/{ep_id}", headers=HEADERS, json=perm_payload)
+    if resp.status_code == 200:
+        print(f"✓ CAN_QUERY on '{ep_name}'")
+    else:
+        print(f"⚠ Permission for '{ep_name}': {resp.text[:120]}")
+
+# COMMAND ----------
+
+# DBTITLE 1,Deploy the app from workspace files
+deploy_payload = {"source_code_path": source_path}
+resp = requests.post(f"{HOST}/api/2.0/apps/{APP_NAME}/deployments", headers=HEADERS, json=deploy_payload)
+if resp.status_code == 200:
+    deployment = resp.json()
+    print(f"✓ Deployment started: {deployment.get('deployment_id', '')}")
+    print(f"  Source: {source_path}")
+else:
+    print(f"Deployment response ({resp.status_code}): {resp.text[:300]}")
+
+print("\nWaiting for app to start...")
+for i in range(60):
+    time.sleep(10)
+    resp = requests.get(f"{HOST}/api/2.0/apps/{APP_NAME}", headers=HEADERS)
+    if resp.status_code == 200:
+        status = resp.json().get("app_status", {})
+        state = status.get("state", "")
+        if state == "RUNNING":
+            print(f"\n✓ App is live: {resp.json().get('url', '')}")
+            break
+        elif state in ("FAILED", "CRASHED"):
+            print(f"\n✗ App failed: {status.get('message', '')}")
+            break
+        elif i % 3 == 0:
+            print(f"  ... {state}")
+else:
+    print("\n⚠ Timed out — check app status in workspace UI")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## ✓ Done!
+# MAGIC ## Done
 # MAGIC
-# MAGIC - **Models registered** to `{UC_CATALOG}.{UC_SCHEMA}`
-# MAGIC - **Endpoints** provisioning with scale-to-zero (3–10 min cold start)
-# MAGIC - **Next**: run `databricks apps deploy model-workbench` locally to deploy the UI
+# MAGIC Your Model Workbench is deployed. The app auto-discovers all serving endpoints
+# MAGIC in your workspace — the custom models above plus any Foundation Model APIs.
+# MAGIC
+# MAGIC Custom endpoints use scale-to-zero. First request after cold start takes 3–10 min to warm up.
