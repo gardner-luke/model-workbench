@@ -173,7 +173,7 @@ export function RegistryPage() {
       <div className="space-y-2">
         <h2 className="text-2xl font-semibold tracking-tight">Endpoints</h2>
         <p className="text-sm text-muted-foreground">
-          Every model deployed in this workspace. Click a card to open its playground.
+          Custom models registered to this project plus Databricks Foundation Model APIs. Click a card to open its playground.
         </p>
       </div>
 

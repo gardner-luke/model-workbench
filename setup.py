@@ -5,11 +5,12 @@
 # MAGIC This notebook orchestrates the full deployment:
 # MAGIC 1. Creates a Unity Catalog schema
 # MAGIC 2. Runs each model notebook (register model + create endpoint)
-# MAGIC 3. Creates and deploys the Databricks App
-# MAGIC 4. Grants the app's service principal access to all model endpoints
+# MAGIC 3. Creates the Databricks App and grants permissions
+# MAGIC 4. Deploys an analytics dashboard (optional — links from the app's nav)
+# MAGIC 5. Deploys the app
 # MAGIC
-# MAGIC The app shows only the custom models registered by this project plus
-# MAGIC Databricks Foundation Model APIs. New models added to the schema appear automatically.
+# MAGIC The app shows only the custom models registered to the `model_workbench` schema
+# MAGIC plus Databricks Foundation Model APIs. New models added to the schema appear automatically.
 # MAGIC
 # MAGIC **Edit the configuration cell below, then Run All.**
 
@@ -75,22 +76,6 @@ for notebook_name, endpoint_name in MODELS.items():
     except Exception as e:
         print(f"  ✗ {notebook_name} failed: {e}")
 
-print(f"Deploying {len(MODELS)} models in parallel...")
-results = {}
-with ThreadPoolExecutor(max_workers=len(MODELS)) as pool:
-    futures = {pool.submit(run_model, nb): nb for nb in MODELS.keys()}
-    for future in as_completed(futures):
-        nb = futures[future]
-        try:
-            future.result()
-            results[nb] = "✓"
-            print(f"  ✓ {nb}")
-        except Exception as e:
-            results[nb] = f"✗ {e}"
-            print(f"  ✗ {nb}: {e}")
-
-print(f"\n{sum(1 for v in results.values() if v == '✓')}/{len(MODELS)} models deployed successfully")
-
 # COMMAND ----------
 
 # MAGIC %md
@@ -116,10 +101,20 @@ else:
     resp = requests.post(f"{HOST}/api/2.0/apps", headers=HEADERS, json=payload)
     resp.raise_for_status()
     app = resp.json()
-    print(f"✓ App '{APP_NAME}' created")
-    time.sleep(5)
-    resp = requests.get(f"{HOST}/api/2.0/apps/{APP_NAME}", headers=HEADERS)
-    app = resp.json()
+    print(f"✓ App '{APP_NAME}' created — waiting for RUNNING state...")
+    for _wait in range(30):
+        time.sleep(10)
+        resp = requests.get(f"{HOST}/api/2.0/apps/{APP_NAME}", headers=HEADERS)
+        app = resp.json()
+        state = app.get("app_status", {}).get("state", "")
+        if state == "RUNNING":
+            print(f"  ✓ App is RUNNING")
+            break
+        elif state in ("FAILED", "CRASHED"):
+            print(f"  ✗ App failed to start: {app.get('app_status', {}).get('message', '')}")
+            break
+    else:
+        print(f"  ⚠ App not yet RUNNING (state: {state}) — deployment may fail")
 
 sp_client_id = app.get("service_principal_client_id")
 print(f"  App SP: {app.get('service_principal_name', sp_client_id)}")
@@ -143,14 +138,106 @@ for ep_name in MODELS.values():
 
 # COMMAND ----------
 
-# DBTITLE 1,Deploy the app
+# MAGIC %md
+# MAGIC ## Step 4: Deploy Analytics Dashboard
+
+# COMMAND ----------
+
+# DBTITLE 1,Create Lakeview dashboard
+import json
+
 notebook_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
 base_path = "/".join(notebook_path.split("/")[:-1])
 
+workspace_id = spark.conf.get("spark.databricks.clusterUsageTags.orgId")
+
+# Read and fill placeholders in the dashboard spec
+dashboard_ws_path = f"{base_path}/dashboard/usage_dashboard.lvdash.json"
+if not dashboard_ws_path.startswith("/Workspace"):
+    dashboard_ws_path = f"/Workspace{dashboard_ws_path}"
+
+dashboard_url = ""
+
+# Read dashboard spec from workspace file via REST API
+import base64
+export_path = dashboard_ws_path.replace("/Workspace", "", 1) if dashboard_ws_path.startswith("/Workspace") else dashboard_ws_path
+resp = requests.get(f"{HOST}/api/2.0/workspace/export", headers=HEADERS, params={"path": dashboard_ws_path, "format": "AUTO"})
+dash_spec = None
+if resp.status_code == 200:
+    content_b64 = resp.json().get("content", "")
+    dash_spec = base64.b64decode(content_b64).decode("utf-8")
+    dash_spec = dash_spec.replace("<YOUR_CATALOG>", UC_CATALOG)
+    dash_spec = dash_spec.replace("<YOUR_WORKSPACE_ID>", workspace_id)
+else:
+    print(f"⚠ Could not read dashboard JSON ({resp.status_code}): {resp.text[:120]}")
+
+if dash_spec:
+
+    # Check if dashboard already exists
+    resp = requests.get(f"{HOST}/api/2.0/lakeview/dashboards", headers=HEADERS, params={"page_size": 100})
+    existing_id = None
+    if resp.status_code == 200:
+        for d in resp.json().get("dashboards", []):
+            if d.get("display_name") == "Model Workbench — Usage & Cost":
+                existing_id = d["dashboard_id"]
+                break
+
+    dash_payload = {
+        "display_name": "Model Workbench — Usage & Cost",
+        "serialized_dashboard": dash_spec,
+        "parent_path": "/".join(dashboard_ws_path.rsplit("/", 2)[:-2]),
+    }
+
+    if existing_id:
+        resp = requests.patch(f"{HOST}/api/2.0/lakeview/dashboards/{existing_id}", headers=HEADERS, json=dash_payload)
+        dash_id = existing_id
+        print(f"⏭ Dashboard updated: {dash_id}")
+    else:
+        resp = requests.post(f"{HOST}/api/2.0/lakeview/dashboards", headers=HEADERS, json=dash_payload)
+        if resp.status_code == 200:
+            dash_id = resp.json().get("dashboard_id", "")
+            print(f"✓ Dashboard created: {dash_id}")
+        else:
+            dash_id = ""
+            print(f"⚠ Dashboard creation failed ({resp.status_code}): {resp.text[:200]}")
+
+    if dash_id:
+        # Publish dashboard
+        pub_resp = requests.post(
+            f"{HOST}/api/2.0/lakeview/dashboards/{dash_id}/published",
+            headers=HEADERS,
+            json={"embed_credentials": True},
+        )
+        if pub_resp.status_code == 200:
+            print(f"  ✓ Dashboard published")
+        else:
+            print(f"  ⚠ Publish failed: {pub_resp.text[:120]}")
+        dashboard_url = f"{HOST}/dashboardsv3/{dash_id}/published"
+        print(f"  URL: {dashboard_url}")
+else:
+    print("⚠ Dashboard JSON not found — skipping analytics dashboard")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 5: Deploy the App
+
+# COMMAND ----------
+
+# DBTITLE 1,Deploy the app
 # The apps API requires an absolute workspace path starting with /Workspace
 app_source_path = f"{base_path}/app"
 if not app_source_path.startswith("/Workspace"):
     app_source_path = f"/Workspace{app_source_path}"
+
+# Set DASHBOARD_URL env var on the app so the Analytics link shows in the nav
+if dashboard_url:
+    env_payload = {"name": APP_NAME, "env": [{"name": "DASHBOARD_URL", "value": dashboard_url}]}
+    resp = requests.patch(f"{HOST}/api/2.0/apps/{APP_NAME}", headers=HEADERS, json=env_payload)
+    if resp.status_code == 200:
+        print(f"✓ DASHBOARD_URL set on app")
+    else:
+        print(f"⚠ Failed to set DASHBOARD_URL: {resp.text[:120]}")
 
 print(f"Deploying from: {app_source_path}")
 deploy_payload = {"source_code_path": app_source_path}
