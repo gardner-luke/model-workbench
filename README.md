@@ -13,7 +13,7 @@ A Databricks App that auto-discovers every model serving endpoint in your worksp
 
 1. Import this repo into your Databricks workspace (Repos or Workspace Files)
 2. Open `setup` as a notebook
-3. Fill in the widgets at the top (catalog name, optional HF token for SAM 3)
+3. Edit the configuration cell at the top (catalog name, app name, optional HF token for SAM 3)
 4. **Run All**
 
 The notebook handles everything: model registration, endpoint creation, app deployment, and permissions. Takes ~15–20 minutes.

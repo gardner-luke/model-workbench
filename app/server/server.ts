@@ -181,8 +181,23 @@ appkit.server.extend((app) => {
       const ws = new WorkspaceClient({});
       const endpoints: EndpointInfo[] = [];
 
+      // Only show: (a) Foundation Model APIs, or (b) custom endpoints whose
+      // registered model lives in a ".model_workbench." schema. This keeps the
+      // UI focused on project models + FMAPI and filters out unrelated endpoints
+      // in the workspace. When you register a new model to the model_workbench
+      // schema and create an endpoint, it appears here automatically.
+      const UC_SCHEMA_MARKER = '.model_workbench.';
+
       for await (const ep of ws.servingEndpoints.list()) {
         const entity = ep.config?.served_entities?.[0];
+        const kind = classifyKind(entity);
+        const entityName = entity?.entity_name ?? '';
+
+        const isFoundationModel = kind === 'foundation_model';
+        const isProjectModel = entityName.includes(UC_SCHEMA_MARKER);
+
+        if (!isFoundationModel && !isProjectModel) continue;
+
         const modelName =
           entity?.foundation_model?.name ??
           entity?.external_model?.name ??
@@ -198,7 +213,7 @@ appkit.server.extend((app) => {
           ready: ep.state?.ready === 'READY',
           state: ep.state?.ready ?? null,
           configUpdate: ep.state?.config_update ?? null,
-          kind: classifyKind(entity),
+          kind,
           modality: classifyModality(ep.name ?? null, task, modelName),
           modelName,
           description: ep.description ?? null,

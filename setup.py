@@ -8,14 +8,18 @@
 # MAGIC 3. Creates and deploys the Databricks App
 # MAGIC 4. Grants the app's service principal access to all endpoints
 # MAGIC
-# MAGIC **Fill in the widgets at the top, then Run All.**
+# MAGIC **Edit the configuration cell below, then Run All.**
 
 # COMMAND ----------
 
-# DBTITLE 1,Configuration
-dbutils.widgets.text("uc_catalog", "", "Unity Catalog Name")
-dbutils.widgets.text("hf_token_scope", "", "HF Secret Scope (for SAM 3, leave blank to skip)")
-dbutils.widgets.text("hf_token_key", "", "HF Secret Key (for SAM 3, leave blank to skip)")
+# DBTITLE 1,Configuration — edit these values
+UC_CATALOG = ""                        # Your Unity Catalog catalog name
+UC_SCHEMA = "model_workbench"          # Schema name (will be created)
+APP_NAME = "model-workbench"           # Databricks App name (becomes the URL slug)
+
+# SAM 3 requires a gated HuggingFace token. Leave blank to skip.
+HF_TOKEN_SCOPE = ""                    # Databricks secret scope containing your HF token
+HF_TOKEN_KEY = ""                      # Key within that scope
 
 # COMMAND ----------
 
@@ -24,12 +28,7 @@ dbutils.widgets.text("hf_token_key", "", "HF Secret Key (for SAM 3, leave blank 
 
 # COMMAND ----------
 
-UC_CATALOG = dbutils.widgets.get("uc_catalog").strip()
-UC_SCHEMA = "model_workbench"
-HF_TOKEN_SCOPE = dbutils.widgets.get("hf_token_scope").strip()
-HF_TOKEN_KEY = dbutils.widgets.get("hf_token_key").strip()
-
-assert UC_CATALOG, "Set the 'uc_catalog' widget to your Unity Catalog name before running"
+assert UC_CATALOG, "Set UC_CATALOG in the configuration cell above before running"
 
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {UC_CATALOG}.{UC_SCHEMA}")
 print(f"✓ Schema ready: {UC_CATALOG}.{UC_SCHEMA}")
@@ -89,8 +88,6 @@ import time
 HOST = f"https://{spark.conf.get('spark.databricks.workspaceUrl')}"
 TOKEN = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
 HEADERS = {"Authorization": f"Bearer {TOKEN}", "Content-Type": "application/json"}
-
-APP_NAME = "model-workbench"
 
 # Create or get the app
 resp = requests.get(f"{HOST}/api/2.0/apps/{APP_NAME}", headers=HEADERS)
