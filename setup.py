@@ -303,21 +303,49 @@ print(f"✓ Depth Anything → {UC_NAME_DEPTH}")
 
 # MAGIC %md
 # MAGIC ### SAM 3 (optional — requires gated HuggingFace access)
+# MAGIC
+# MAGIC SAM 3 needs `transformers>=5.8.0` which conflicts with 4.46.3 used above.
+# MAGIC The pip install and restart always run (they're fast); the actual registration
+# MAGIC is skipped if no HF token is configured.
 
 # COMMAND ----------
 
+# MAGIC %pip install -q -U "transformers==5.8.0" "huggingface_hub>=1.0,<2.0" "accelerate>=0.34.0" mlflow pillow torch
+
+# COMMAND ----------
+
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
+# DBTITLE 1,Register SAM 3 (skipped if no HF token)
+import os
+HF_TOKEN_SCOPE = dbutils.widgets.get("hf_token_scope").strip()
+HF_TOKEN_KEY = dbutils.widgets.get("hf_token_key").strip()
+
 if HF_TOKEN_SCOPE and HF_TOKEN_KEY:
+    import base64
+    import io
+    from typing import Any
+
+    import mlflow
+    import numpy as np
+    import pandas as pd
+    import torch
+    from mlflow.models.signature import infer_signature
+    from PIL import Image
+    from transformers import Sam3Model, Sam3Processor
+
+    UC_CATALOG = dbutils.widgets.get("uc_catalog").strip()
+    UC_SCHEMA = "model_workbench"
+    UC_NAME_SAM3 = f"{UC_CATALOG}.{UC_SCHEMA}.sam3"
+
     HF_TOKEN = dbutils.secrets.get(scope=HF_TOKEN_SCOPE, key=HF_TOKEN_KEY).strip()
     assert HF_TOKEN and HF_TOKEN.isascii(), "HF token is empty or invalid — check your secret"
     os.environ["HF_TOKEN"] = HF_TOKEN
     os.environ["HUGGINGFACE_HUB_TOKEN"] = HF_TOKEN
 
-    import subprocess
-    subprocess.check_call(["pip", "install", "-q", "transformers==5.8.0", "huggingface_hub>=1.0,<2.0", "accelerate>=0.34.0"])
-
-    from transformers import Sam3Model, Sam3Processor
-
-    UC_NAME_SAM3 = f"{UC_CATALOG}.{UC_SCHEMA}.sam3"
+    HF_MODEL_SAM3 = "facebook/sam3"
 
     class Sam3SegmenterModel(mlflow.pyfunc.PythonModel):
         def load_context(self, context: Any) -> None:
@@ -346,10 +374,15 @@ if HF_TOKEN_SCOPE and HF_TOKEN_KEY:
                     result = self.processor.post_process_instance_segmentation(
                         raw, threshold=float(r.get("threshold") or 0.5),
                         mask_threshold=float(r.get("mask_threshold") or 0.5), target_sizes=[(h, w)])[0]
-                    masks, boxes, scores = result.get("masks"), result.get("boxes"), result.get("scores")
+                    masks = result.get("masks")
+                    boxes = result.get("boxes")
+                    scores = result.get("scores")
                     mask_list, box_list, score_list = [], [], []
                     if masks is not None and len(masks) > 0:
-                        for m, b, s in zip(masks.cpu().numpy(), boxes.cpu().numpy(), scores.cpu().numpy()):
+                        masks_np = masks.detach().cpu().numpy() if torch.is_tensor(masks) else np.asarray(masks)
+                        boxes_np = boxes.detach().cpu().numpy() if torch.is_tensor(boxes) else np.asarray(boxes)
+                        scores_np = scores.detach().cpu().numpy() if torch.is_tensor(scores) else np.asarray(scores)
+                        for m, b, s in zip(masks_np, boxes_np, scores_np):
                             buf = io.BytesIO()
                             Image.fromarray((np.squeeze(m) > 0).astype(np.uint8) * 255, mode="L").save(buf, format="PNG")
                             mask_list.append(base64.b64encode(buf.getvalue()).decode("ascii"))
@@ -358,6 +391,11 @@ if HF_TOKEN_SCOPE and HF_TOKEN_KEY:
                     outputs.append({"masks": mask_list, "boxes": box_list, "scores": score_list,
                                     "count": len(mask_list), "image_size": [w, h]})
             return outputs
+
+    mlflow.set_registry_uri("databricks-uc")
+    _buf = io.BytesIO()
+    Image.new("RGB", (4, 4), color=(255, 0, 0)).save(_buf, format="PNG")
+    TINY_IMG = base64.b64encode(_buf.getvalue()).decode("ascii")
 
     _in = pd.DataFrame([{"image": TINY_IMG, "text_prompt": "object", "threshold": 0.5, "mask_threshold": 0.5}])
     _sig = infer_signature(_in, [{"masks": ["x"], "boxes": [[0.0]*4], "scores": [0.9], "count": 1, "image_size": [4, 4]}])
@@ -378,6 +416,11 @@ else:
 
 import requests
 import time
+
+UC_CATALOG = dbutils.widgets.get("uc_catalog").strip()
+UC_SCHEMA = "model_workbench"
+HF_TOKEN_SCOPE = dbutils.widgets.get("hf_token_scope").strip()
+HF_TOKEN_KEY = dbutils.widgets.get("hf_token_key").strip()
 
 HOST = f"https://{spark.conf.get('spark.databricks.workspaceUrl')}"
 TOKEN = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
