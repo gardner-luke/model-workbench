@@ -18,6 +18,7 @@
 UC_CATALOG = ""                        # Your Unity Catalog catalog name
 UC_SCHEMA = "model_workbench"          # Schema name (will be created if needed)
 APP_NAME = "model-workbench"           # Databricks App name (becomes the URL slug)
+WORKSPACE_ID = ""                      # Numeric workspace ID (number after o= in your URL) — needed for dashboard
 
 # Models to deploy. Each entry maps a notebook path to its serving endpoint name.
 # Comment out any model you don't want to deploy.
@@ -25,7 +26,7 @@ MODELS = {
     "models/clip": "clip-vit-large-patch14",
     "models/grounding_dino": "grounding-dino",
     "models/depth_anything": "depth-anything",
-    "models/yolo26": "yolo26",
+    # "models/yolo26": "yolo26",         # Uncomment when ready
     # "models/sam3": "sam3",             # Requires HF_TOKEN_SCOPE/KEY (gated model)
 }
 
@@ -71,6 +72,7 @@ dbutils.notebook.run(f"{base_path}/setup/2_app", timeout_seconds=0, arguments={
     "uc_schema": UC_SCHEMA,
     "app_name": APP_NAME,
     "models_json": models_json,
+    "workspace_id": WORKSPACE_ID,
 })
 print("✓ App step complete")
 

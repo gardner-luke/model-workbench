@@ -19,6 +19,7 @@ uc_catalog = dbutils.widgets.get("uc_catalog").strip()
 uc_schema = dbutils.widgets.get("uc_schema").strip() or "model_workbench"
 app_name = dbutils.widgets.get("app_name").strip()
 models_json = dbutils.widgets.get("models_json").strip()
+workspace_id = dbutils.widgets.get("workspace_id").strip()
 
 MODELS = json.loads(models_json)
 
@@ -97,69 +98,65 @@ for ep_name in MODELS.values():
 notebook_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
 base_path = "/".join(notebook_path.split("/")[:-2])
 
-try:
-    workspace_id = spark.conf.get("spark.databricks.clusterUsageTags.orgId")
-except Exception:
-    workspace_id = dbutils.notebook.entry_point.getDbutils().notebook().getContext().tags().apply("orgId")
-
-dashboard_ws_path = f"{base_path}/dashboard/usage_dashboard.lvdash.json"
-if not dashboard_ws_path.startswith("/Workspace"):
-    dashboard_ws_path = f"/Workspace{dashboard_ws_path}"
-
 dashboard_url = ""
 
-resp = requests.get(f"{HOST}/api/2.0/workspace/export", headers=HEADERS, params={"path": dashboard_ws_path, "format": "AUTO"})
-dash_spec = None
-if resp.status_code == 200:
-    content_b64 = resp.json().get("content", "")
-    dash_spec = base64.b64decode(content_b64).decode("utf-8")
-    dash_spec = dash_spec.replace("<YOUR_CATALOG>", uc_catalog)
-    dash_spec = dash_spec.replace("<YOUR_WORKSPACE_ID>", workspace_id)
+if not workspace_id:
+    print("⚠ WORKSPACE_ID not set — skipping dashboard deployment")
 else:
-    print(f"⚠ Could not read dashboard JSON ({resp.status_code}): {resp.text[:120]}")
+    dashboard_ws_path = f"{base_path}/dashboard/usage_dashboard.lvdash.json"
+    if not dashboard_ws_path.startswith("/Workspace"):
+        dashboard_ws_path = f"/Workspace{dashboard_ws_path}"
 
-if dash_spec:
-    resp = requests.get(f"{HOST}/api/2.0/lakeview/dashboards", headers=HEADERS, params={"page_size": 100})
-    existing_id = None
+    resp = requests.get(f"{HOST}/api/2.0/workspace/export", headers=HEADERS, params={"path": dashboard_ws_path, "format": "AUTO"})
+    dash_spec = None
     if resp.status_code == 200:
-        for d in resp.json().get("dashboards", []):
-            if d.get("display_name") == "Model Workbench — Usage & Cost":
-                existing_id = d["dashboard_id"]
-                break
-
-    dash_payload = {
-        "display_name": "Model Workbench — Usage & Cost",
-        "serialized_dashboard": dash_spec,
-        "parent_path": "/".join(dashboard_ws_path.rsplit("/", 2)[:-2]),
-    }
-
-    if existing_id:
-        resp = requests.patch(f"{HOST}/api/2.0/lakeview/dashboards/{existing_id}", headers=HEADERS, json=dash_payload)
-        dash_id = existing_id
-        print(f"⏭ Dashboard updated: {dash_id}")
+        content_b64 = resp.json().get("content", "")
+        dash_spec = base64.b64decode(content_b64).decode("utf-8")
+        dash_spec = dash_spec.replace("<YOUR_CATALOG>", uc_catalog)
+        dash_spec = dash_spec.replace("<YOUR_WORKSPACE_ID>", workspace_id)
     else:
-        resp = requests.post(f"{HOST}/api/2.0/lakeview/dashboards", headers=HEADERS, json=dash_payload)
-        if resp.status_code == 200:
-            dash_id = resp.json().get("dashboard_id", "")
-            print(f"✓ Dashboard created: {dash_id}")
-        else:
-            dash_id = ""
-            print(f"⚠ Dashboard creation failed ({resp.status_code}): {resp.text[:200]}")
+        print(f"⚠ Could not read dashboard JSON ({resp.status_code}): {resp.text[:120]}")
 
-    if dash_id:
-        pub_resp = requests.post(
-            f"{HOST}/api/2.0/lakeview/dashboards/{dash_id}/published",
-            headers=HEADERS,
-            json={"embed_credentials": True},
-        )
-        if pub_resp.status_code == 200:
-            print(f"  ✓ Dashboard published")
+    if dash_spec:
+        resp = requests.get(f"{HOST}/api/2.0/lakeview/dashboards", headers=HEADERS, params={"page_size": 100})
+        existing_id = None
+        if resp.status_code == 200:
+            for d in resp.json().get("dashboards", []):
+                if d.get("display_name") == "Model Workbench — Usage & Cost":
+                    existing_id = d["dashboard_id"]
+                    break
+
+        dash_payload = {
+            "display_name": "Model Workbench — Usage & Cost",
+            "serialized_dashboard": dash_spec,
+            "parent_path": "/".join(dashboard_ws_path.rsplit("/", 2)[:-2]),
+        }
+
+        if existing_id:
+            resp = requests.patch(f"{HOST}/api/2.0/lakeview/dashboards/{existing_id}", headers=HEADERS, json=dash_payload)
+            dash_id = existing_id
+            print(f"⏭ Dashboard updated: {dash_id}")
         else:
-            print(f"  ⚠ Publish failed: {pub_resp.text[:120]}")
-        dashboard_url = f"{HOST}/dashboardsv3/{dash_id}/published"
-        print(f"  URL: {dashboard_url}")
-else:
-    print("⚠ Dashboard JSON not found — skipping analytics dashboard")
+            resp = requests.post(f"{HOST}/api/2.0/lakeview/dashboards", headers=HEADERS, json=dash_payload)
+            if resp.status_code == 200:
+                dash_id = resp.json().get("dashboard_id", "")
+                print(f"✓ Dashboard created: {dash_id}")
+            else:
+                dash_id = ""
+                print(f"⚠ Dashboard creation failed ({resp.status_code}): {resp.text[:200]}")
+
+        if dash_id:
+            pub_resp = requests.post(
+                f"{HOST}/api/2.0/lakeview/dashboards/{dash_id}/published",
+                headers=HEADERS,
+                json={"embed_credentials": True},
+            )
+            if pub_resp.status_code == 200:
+                print(f"  ✓ Dashboard published")
+            else:
+                print(f"  ⚠ Publish failed: {pub_resp.text[:120]}")
+            dashboard_url = f"{HOST}/dashboardsv3/{dash_id}/published"
+            print(f"  URL: {dashboard_url}")
 
 # COMMAND ----------
 
