@@ -13,7 +13,6 @@
 import json
 import requests
 import time
-import base64
 
 uc_catalog = dbutils.widgets.get("uc_catalog").strip()
 uc_schema = dbutils.widgets.get("uc_schema").strip() or "model_workbench"
@@ -103,19 +102,15 @@ dashboard_url = ""
 if not workspace_id:
     print("⚠ WORKSPACE_ID not set — skipping dashboard deployment")
 else:
-    dashboard_ws_path = f"{base_path}/dashboard/usage_dashboard.lvdash.json"
-    if not dashboard_ws_path.startswith("/Workspace"):
-        dashboard_ws_path = f"/Workspace{dashboard_ws_path}"
-
-    resp = requests.get(f"{HOST}/api/2.0/workspace/export", headers=HEADERS, params={"path": dashboard_ws_path, "format": "AUTO"})
+    dashboard_file = f"/Workspace{base_path}/dashboard/usage_dashboard.lvdash.json"
     dash_spec = None
-    if resp.status_code == 200:
-        content_b64 = resp.json().get("content", "")
-        dash_spec = base64.b64decode(content_b64).decode("utf-8")
+    try:
+        with open(dashboard_file) as f:
+            dash_spec = f.read()
         dash_spec = dash_spec.replace("<YOUR_CATALOG>", uc_catalog)
         dash_spec = dash_spec.replace("<YOUR_WORKSPACE_ID>", workspace_id)
-    else:
-        print(f"⚠ Could not read dashboard JSON ({resp.status_code}): {resp.text[:120]}")
+    except FileNotFoundError:
+        print(f"⚠ Dashboard file not found: {dashboard_file}")
 
     if dash_spec:
         resp = requests.get(f"{HOST}/api/2.0/lakeview/dashboards", headers=HEADERS, params={"page_size": 100})

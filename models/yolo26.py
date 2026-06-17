@@ -7,7 +7,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install -q mlflow ultralytics pillow torch
+# MAGIC %pip install -q mlflow ultralytics pillow torch "numpy<2"
 
 # COMMAND ----------
 

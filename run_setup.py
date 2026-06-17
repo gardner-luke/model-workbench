@@ -26,7 +26,7 @@ MODELS = {
     "models/clip": "clip-vit-large-patch14",
     "models/grounding_dino": "grounding-dino",
     "models/depth_anything": "depth-anything",
-    # "models/yolo26": "yolo26",         # Uncomment when ready
+    "models/yolo26": "yolo26",
     # "models/sam3": "sam3",             # Requires HF_TOKEN_SCOPE/KEY (gated model)
 }
 
