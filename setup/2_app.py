@@ -124,7 +124,7 @@ else:
         dash_payload = {
             "display_name": "Model Workbench — Usage & Cost",
             "serialized_dashboard": dash_spec,
-            "parent_path": "/".join(dashboard_ws_path.rsplit("/", 2)[:-2]),
+            "parent_path": "/".join(dashboard_file.rsplit("/", 2)[:-2]),
         }
 
         if existing_id:
